@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>BASE DEFENSE</title>
+  <meta name="theme-color" content="#0D0F19" />
+
+  <!-- Farcade SDK (clean, single instance) -->
+  <script src="https://cdn.jsdelivr.net/npm/@farcade/game-sdk@latest/dist/index.min.js"></script>
+
+  <style>
+    :root {
+      --bg: #070b12;
+      --neon: #4FC3FF;
+      --text: #e8f4ff;
+      --muted: #86a7c7;
+      --good: #7CFFB2;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, system-ui;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    .app { position: fixed; inset:0; display:flex; align-items:center; justify-content:center; }
+    .stage { position:relative; width:100vw; height:100vh; display:flex; justify-content:center; align-items:center; }
+
+    canvas#game {
+      width: min(100vw, 66vh);
+      height: min(150vw, 100vh);
+      max-height: 100vh;
+      background: radial-gradient(circle at 50% 50%, #10162b, #0D0F19);
+      border-radius: 16px;
+      box-shadow: 0 0 40px rgba(0,0,0,0.6);
+    }
+
+    .hud { position:absolute; inset:0; pointer-events:none; display:flex; flex-direction:column; }
+    .topbar { display:flex; justify-content:space-between; padding:10px; }
+    .pill { pointer-events:auto; padding:8px 12px; border-radius:999px; background:rgba(79,195,255,0.18); border:1px solid rgba(79,195,255,0.4); font-weight:700; }
+
+    .score-pill {
+      position:absolute;
+      top:70px;
+      left:50%;
+      transform:translateX(-50%);
+      padding:8px 14px;
+      background:rgba(18,22,42,0.6);
+      border:1px solid rgba(79,195,255,0.35);
+      border-radius:12px;
+      pointer-events:none;
+    }
+
+    .center-overlay { position:absolute; inset:0; display:grid; place-items:center; }
+    .hidden { display:none !important; }
+
+    .panel {
+      background:rgba(10,14,24,0.92);
+      border:1px solid rgba(79,195,255,0.4);
+      padding:20px;
+      border-radius:16px;
+      text-align:center;
+      max-width:400px;
+    }
+
+    .btn {
+      padding:12px;
+      margin-top:12px;
+      width:100%;
+      background:rgba(79,195,255,0.3);
+      border:1px solid rgba(79,195,255,0.6);
+      border-radius:12px;
+      font-weight:800;
+      cursor:pointer;
+      text-transform:uppercase;
+    }
+
+    .hpbar { width:150px; height:14px; border:1px solid rgba(79,195,255,0.3); background:rgba(255,255,255,0.05); border-radius:999px; overflow:hidden; }
+    .hpbar .fill { width:100%; height:100%; background:linear-gradient(90deg, var(--good), var(--neon)); transform-origin:left center; }
+
+  </style>
+</head>
+
+<body>
+<div class="app">
+<div class="stage">
+
+<canvas id="game" width="400" height="600"></canvas>
+
+<!-- HUD -->
+<div class="hud">
+  <div class="topbar">
+    <div class="pill">Wave <span id="waveLabel">1</span></div>
+    <div class="pill">
+      <div class="hpbar"><div id="hpFill" class="fill"></div></div>
+    </div>
+    <div class="pill" id="muteBtn">🔊</div>
+  </div>
+
+  <div class="score-pill">
+    Score: <span id="scoreLabel">0</span>
+  </div>
+</div>
+
+<!-- Start Screen -->
+<div id="startOverlay" class="center-overlay">
+  <div class="panel">
+    <h2>BASE DEFENSE</h2>
+    <p>Protect the core. Survive waves.</p>
+    <button id="startBtn" class="btn">Start</button>
+  </div>
+</div>
+
+<!-- Upgrade -->
+<div id="upgradeOverlay" class="center-overlay hidden">
+  <div class="panel">
+    <h2>UPGRADE</h2>
+    <button id="upgFire" class="btn">+20% Fire Rate</button>
+    <button id="upgDamage" class="btn">+20% Damage</button>
+    <button id="upgRange" class="btn">+15% Range</button>
+  </div>
+</div>
+
+<!-- Game Over -->
+<div id="gameOverOverlay" class="center-overlay hidden">
+  <div class="panel">
+    <h2>GAME OVER</h2>
+    <p>Score: <span id="finalScore">0</span></p>
+    <p>Wave: <span id="finalWave">1</span></p>
+    <button id="playAgainBtn" class="btn">Play Again</button>
+  </div>
+</div>
+
+</div>
+</div>
+<script>
+/* ------------------------------
+   GAME CONSTANTS & STATE
+--------------------------------*/
+let canvas, ctx;
+let W = 400, H = 600;
+
+let gameStarted = false;
+let inUpgrade = false;
+let inGameOver = false;
+let isMuted = false;
+
+const state = {
+  wave: 1,
+  score: 0,
+  baseHP: 100,
+  baseHPMax: 100,
+  enemies: [],
+  bullets: [],
+  particles: [],
+  lastTime: 0,
+  fireCooldown: 0,
+  spawnsRemaining: 0,
+  spawning: false,
+  waveActive: false
+};
+
+/* CONFIG */
+const CONFIG = {
+  player: { range: 120, fireRate: 3, damage: 10, maxHealth: 100 },
+  enemy: { baseHealth: 20, baseSpeed: 40, spawnCount: 4 },
+  gameplay: {
+    waveHealthScale: 1.18,
+    waveSpeedScale: 1.12,
+    waveSpawnScale: 2.0,
+    bulletSpeed: 260,
+    scorePerKill: 10
+  }
+};
+
+/* ------------------------------
+   UTILITIES
+--------------------------------*/
+const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+const rand = (a,b)=>a+Math.random()*(b-a);
+const dist2 = (x1,y1,x2,y2)=>{ const dx=x2-x1,dy=y2-y1; return dx*dx+dy*dy; };
+
+/* ------------------------------
+   ENTITIES
+--------------------------------*/
+class Enemy {
+  constructor(x,y,hp,speed){
+    this.x=x; this.y=y;
+    this.hp=hp;
+    this.speed=speed;
+    this.r=10;
+    this.alive=true;
+  }
+  update(dt){
+    const dx=W/2-this.x, dy=H/2-this.y;
+    const len=Math.hypot(dx,dy)||1;
+    this.x += (dx/len)*this.speed*dt;
+    this.y += (dy/len)*this.speed*dt;
+
+    if(dist2(this.x,this.y,W/2,H/2) < 25*25){
+      this.alive=false;
+      damageBase(10);
+    }
+  }
+  draw(){
+    ctx.fillStyle="#ff5e7a";
+    ctx.beginPath();
+    ctx.arc(this.x,this.y,this.r,0,Math.PI*2);
+    ctx.fill();
+  }
+}
+
+class Bullet {
+  constructor(x,y,a){
+    this.x=x; this.y=y;
+    this.vx=Math.cos(a)*CONFIG.gameplay.bulletSpeed;
+    this.vy=Math.sin(a)*CONFIG.gameplay.bulletSpeed;
+    this.life=2;
+  }
+  update(dt){
+    this.x+=this.vx*dt;
+    this.y+=this.vy*dt;
+    this.life-=dt;
+  }
+  draw(){
+    ctx.fillStyle="#7CFFB2";
+    ctx.beginPath();
+    ctx.arc(this.x,this.y,3,0,Math.PI*2);
+    ctx.fill();
+  }
+}
+
+/* ------------------------------
+   BASE DAMAGE & SCORE
+--------------------------------*/
+function damageBase(amount){
+  state.baseHP = clamp(state.baseHP-amount,0,state.baseHPMax);
+  document.getElementById("hpFill").style.transform = `scaleX(${state.baseHP/state.baseHPMax})`;
+
+  if(state.baseHP <= 0){
+    endGame();
+  }
+}
+
+/* ------------------------------
+   WAVE SYSTEM
+--------------------------------*/
+function startWave(){
+  const e = CONFIG.enemy;
+  const g = CONFIG.gameplay;
+  const w = state.wave;
+
+  const hp = Math.round(e.baseHealth * Math.pow(g.waveHealthScale, w-1));
+  const speed = e.baseSpeed * Math.pow(g.waveSpeedScale, w-1);
+  const count = Math.round(e.spawnCount * Math.pow(g.waveSpawnScale, w-1));
+
+  state.spawnsRemaining = count;
+  state.waveActive = true;
+  state.spawning = true;
+  state.spawnTimer = 0;
+  state.spawnInterval = 0.12; // VERY FAST
+  state.enemyTemplate = { hp, speed };
+}
+
+function updateSpawning(dt){
+  if(!state.spawning) return;
+
+  state.spawnTimer += dt;
+  if(state.spawnTimer >= state.spawnInterval && state.spawnsRemaining > 0){
+    state.spawnTimer = 0;
+    state.spawnsRemaining--;
+
+    const side=Math.floor(rand(0,4));
+    let x,y;
+    if(side===0){ x=rand(0,W); y=-20; }
+    if(side===1){ x=W+20; y=rand(0,H); }
+    if(side===2){ x=rand(0,W); y=H+20; }
+    if(side===3){ x=-20; y=rand(0,H); }
+
+    const enemy = new Enemy(
+      x, y,
+      state.enemyTemplate.hp,
+      state.enemyTemplate.speed
+    );
+    state.enemies.push(enemy);
+  }
+
+  if(state.spawnsRemaining<=0 && state.enemies.length===0){
+    state.spawning=false;
+    state.waveActive=false;
+    showUpgrade();
+  }
+}
+
+/* ------------------------------
+   SHOOTING
+--------------------------------*/
+function findTarget(){
+  const r2 = CONFIG.player.range * CONFIG.player.range;
+  let best=null, bestD=Infinity;
+
+  for(const e of state.enemies){
+    const d = dist2(e.x,e.y,W/2,H/2);
+    if(d <= r2 && d < bestD){
+      best=e; bestD=d;
+    }
+  }
+  return best;
+}
+
+function tryShoot(dt){
+  state.fireCooldown -= dt;
+  if(state.fireCooldown > 0) return;
+
+  const t = findTarget();
+  if(!t) return;
+
+  const a = Math.atan2(t.y-H/2, t.x-W/2);
+  state.bullets.push(new Bullet(W/2,H/2,a));
+  state.fireCooldown = 1 / CONFIG.player.fireRate;
+}
+
+/* ------------------------------
+   GAME LOOP
+--------------------------------*/
+function update(dt){
+  if(!gameStarted || inUpgrade || inGameOver) return;
+
+  updateSpawning(dt);
+  tryShoot(dt);
+
+  // update enemies
+  for(let i=state.enemies.length-1;i>=0;i--){
+    const e=state.enemies[i];
+    e.update(dt);
+
+    if(!e.alive){
+      state.enemies.splice(i,1);
+    }
+  }
+
+  // update bullets
+  for(let i=state.bullets.length-1;i>=0;i--){
+    const b=state.bullets[i];
+    b.update(dt);
+
+    if(b.life<=0){
+      state.bullets.splice(i,1);
+      continue;
+    }
+
+    for(let j=state.enemies.length-1;j>=0;j--){
+      const e=state.enemies[j];
+      const r = e.r+3;
+
+      if(dist2(b.x,b.y,e.x,e.y) <= r*r){
+        e.hp -= CONFIG.player.damage;
+        b.life = 0;
+
+        if(e.hp <= 0){
+          // SCORE FIX
+          state.score += CONFIG.gameplay.scorePerKill;
+          document.getElementById("scoreLabel").textContent = state.score;
+
+          e.alive=false;
+          state.enemies.splice(j,1);
+        }
+        break;
+      }
+    }
+  }
+}
+
+function render(){
+  ctx.clearRect(0,0,W,H);
+  state.enemies.forEach(e=>e.draw());
+  state.bullets.forEach(b=>b.draw());
+
+  // tower (simple)
+  ctx.fillStyle="#4FC3FF";
+  ctx.beginPath();
+  ctx.arc(W/2,H/2,14,0,Math.PI*2);
+  ctx.fill();
+}
+
+function loop(ts){
+  const t = ts*0.001;
+  const dt = Math.min(0.03, t - (state.lastTime||t));
+  state.lastTime = t;
+
+  update(dt);
+  render();
+
+  requestAnimationFrame(loop);
+}
+
+/* ------------------------------
+   GAME OVER
+--------------------------------*/
+function endGame(){
+  gameStarted=false;
+  inGameOver=true;
+
+  // SEND SCORE TO FARCADE
+  window.FarcadeSDK.singlePlayer.actions.gameOver({
+    score: state.score
+  });
+
+  document.getElementById("finalScore").textContent = state.score;
+  document.getElementById("finalWave").textContent = state.wave;
+  document.getElementById("gameOverOverlay").classList.remove("hidden");
+}
+
+/* ------------------------------
+   UI FLOW
+--------------------------------*/
+function resetGame(){
+  state.wave=1;
+  state.score=0;
+  state.baseHP=state.baseHPMax;
+  state.enemies=[];
+  state.bullets=[];
+  state.fireCooldown=0;
+
+  document.getElementById("scoreLabel").textContent = "0";
+  document.getElementById("hpFill").style.transform = "scaleX(1)";
+  document.getElementById("waveLabel").textContent = "1";
+}
+
+function startGame(){
+  document.getElementById("startOverlay").classList.add("hidden");
+  document.getElementById("upgradeOverlay").classList.add("hidden");
+  document.getElementById("gameOverOverlay").classList.add("hidden");
+
+  resetGame();
+  gameStarted=true;
+  inGameOver=false;
+  startWave();
+}
+
+function showUpgrade(){
+  inUpgrade=true;
+  document.getElementById("upgradeOverlay").classList.remove("hidden");
+}
+
+function applyUpgrade(type){
+  if(type==="fire") CONFIG.player.fireRate *= 1.2;
+  if(type==="damage") CONFIG.player.damage = Math.round(CONFIG.player.damage*1.2);
+  if(type==="range") CONFIG.player.range = Math.round(CONFIG.player.range*1.15);
+
+  state.wave++;
+  document.getElementById("waveLabel").textContent = state.wave;
+  inUpgrade=false;
+  document.getElementById("upgradeOverlay").classList.add("hidden");
+  startWave();
+}
+
+/* ------------------------------
+   INPUT
+--------------------------------*/
+function setupInput(){
+  document.getElementById("startBtn").onclick = startGame;
+  document.getElementById("playAgainBtn").onclick = startGame;
+  document.getElementById("upgFire").onclick = ()=>applyUpgrade("fire");
+  document.getElementById("upgDamage").onclick = ()=>applyUpgrade("damage");
+  document.getElementById("upgRange").onclick = ()=>applyUpgrade("range");
+
+  document.getElementById("muteBtn").onclick = ()=>{
+    isMuted=!isMuted;
+    document.getElementById("muteBtn").textContent = isMuted ? "🔇" : "🔊";
+  };
+}
+
+/* ------------------------------
+   INIT
+--------------------------------*/
+function init(){
+  canvas = document.getElementById("game");
+  ctx = canvas.getContext("2d");
+
+  setupInput();
+  document.getElementById("startOverlay").classList.remove("hidden");
+
+  requestAnimationFrame(loop);
+}
+
+window.onload = init;
+</script>
+
+</body>
+</html>
